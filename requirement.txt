@@ -1,5 +1,0 @@
-streamlit
-pandas
-xml.etree.ElementTree
-tempfile
-openpyxl
