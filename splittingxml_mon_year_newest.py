@@ -9,7 +9,7 @@ EXPECTED_COLUMNS = [
     "Name", "Identifier", "FirstName", "MiddleName", "LastName",
     "PlanCost", "EmploymentStatus", "HireDate", "HiredOn",
     "TerminationDate", "TerminatedOn", "StartDate",
-    "EnrolledOn", "EndDate", "EndedOn" , "CoverageLevel"
+    "EnrolledOn", "EndDate", "EndedOn" 
 ]
 
 def xml_to_exact_excel(xml_file):
@@ -58,7 +58,7 @@ def xml_to_exact_excel(xml_file):
                                 "EnrolledOn": enroll.findtext("EnrolledOn", ""),
                                 "EndDate": enroll.findtext("EndDate", ""),
                                 "EndedOn": enroll.findtext("EndedOn", ""),
-                                "CoverageLevel": enroll.findtext("CoverageLevel", "")
+                                # "CoverageLevel": enroll.findtext("CoverageLevel", "")
                             }
                             
                             if first_employee:
