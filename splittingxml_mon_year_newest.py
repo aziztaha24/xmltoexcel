@@ -1,10 +1,9 @@
 """
 Invoice QC Toolkit — unified Streamlit app
-Combines all 4 pipeline steps used by finance:
   1. XML → XML (split master XML by company)
   2. XML → Excel (single consolidated data file)
   3. Excel + NetSuite CSV merger
-  4. Excel split by company (with formulas + conditional formatting)
+  4. Excel split by company (formulas + conditional formatting)
 """
 
 import streamlit as st
@@ -48,6 +47,10 @@ EXPECTED_COLUMNS = [
     "CarrierPlanCode", "PriorCoverageStartDate"
 ]
 
+COST_COLUMNS = ["Premium ($)", "Coverage/Plan Type/Plan Tier", "Plan SKU"]
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 
 def month_year_inputs(key_prefix: str):
     """Render month + year inputs side by side. Returns (month, year)."""
@@ -68,6 +71,17 @@ def month_year_inputs(key_prefix: str):
             key=f"{key_prefix}_year",
         )
     return month, year.strip()
+
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Write a DataFrame to an in-memory .xlsx and return the bytes."""
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False)
+    return buf.getvalue()
+
+
+def normalize(val):
+    return str(val).strip().lower()
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -109,229 +123,178 @@ def split_xml_by_company(xml_bytes: bytes, month: str, year: str):
 # ────────────────────────────────────────────────────────────────────────────
 # STEP 2 — XML → Excel (single data file)
 # ────────────────────────────────────────────────────────────────────────────
-import pandas as pd
-import xml.etree.ElementTree as ET
-
-# === FILE PATHS ===
-xml_file = r"C:\Users\LENOVO\OneDrive\Documents\REDH\Invoice QC\2026\9. Sept 2026\EN XML & XLS Data Sep-2026\Redirect_Health_Production_20260816_031142_1121345.xml"
-output_file = r"C:\Users\LENOVO\OneDrive\Documents\REDH\Invoice QC\2026\9. Sept 2026\EN XML & XLS Data Sep-2026\Single File before merger.xlsx"
-# === EXPECTED COLUMNS ===
-EXPECTED_COLUMNS = [
-    "Name", "Identifier", "FirstName", "MiddleName", "LastName",
-    "PlanCost", "EmploymentStatus", "HireDate", "HiredOn",
-    "TerminationDate", "TerminatedOn", "StartDate",
-    "EnrolledOn", "EndDate", "EndedOn", "CoverageLevel",
-    "CarrierPlanCode", "PriorCoverageStartDate"
-]
-
-# === FUNCTION ===
-def xml_to_exact_excel(xml_file_path, output_excel_path):
-    context = ET.iterparse(xml_file_path, events=("start", "end"))
+def xml_to_single_excel(xml_bytes: bytes) -> pd.DataFrame:
+    context = ET.iterparse(io.BytesIO(xml_bytes), events=("start", "end"))
     data_list = []
     header_info = {}
 
     for event, elem in context:
-        if event == "end":
-            if elem.tag == "Header":
-                header_info = {
-                    "Disclaimer": elem.findtext("Disclaimer", ""),
-                    "ExchangeName": elem.findtext("ExchangeName", ""),
-                    "VendorName": elem.findtext("VendorName", ""),
-                    "RunDate": elem.findtext("RunDate", ""),
+        if event != "end":
+            continue
+
+        if elem.tag == "Header":
+            header_info = {
+                "Disclaimer": elem.findtext("Disclaimer", ""),
+                "ExchangeName": elem.findtext("ExchangeName", ""),
+                "VendorName": elem.findtext("VendorName", ""),
+                "RunDate": elem.findtext("RunDate", ""),
+            }
+
+        elif elem.tag == "Company":
+            company_data = {
+                "Identifier": elem.findtext("Identifier", ""),
+                "Name": elem.findtext("Name", ""),
+            }
+            full_data = {**header_info, **company_data}
+            first_employee = True
+
+            for emp in elem.findall("Employees/Employee"):
+                emp_data = {
+                    "FirstName": emp.findtext("FirstName", ""),
+                    "MiddleName": emp.findtext("MiddleName", ""),
+                    "LastName": emp.findtext("LastName", ""),
+                    "EmploymentStatus": emp.findtext("EmploymentStatus", ""),
+                    "HireDate": emp.findtext("HireDate", ""),
+                    "HiredOn": emp.findtext("HiredOn", ""),
+                    "TerminationDate": emp.findtext("TerminationDate", ""),
+                    "TerminatedOn": emp.findtext("TerminatedOn", ""),
                 }
 
-            elif elem.tag == "Company":
-                company_data = {
-                    "Identifier": elem.findtext("Identifier", ""),
-                    "Name": elem.findtext("Name", ""),
-                }
-                full_data = {**header_info, **company_data}
-                employees = elem.findall("Employees/Employee")
-                first_employee = True
+                enrollments = emp.findall("Enrollments/Enrollment")
+                if enrollments:
+                    for enroll in enrollments:
+                        enroll_data = {
+                            "PlanCost": enroll.findtext("PlanCost", ""),
+                            "StartDate": enroll.findtext("StartDate", ""),
+                            "EnrolledOn": enroll.findtext("EnrolledOn", ""),
+                            "EndDate": enroll.findtext("EndDate", ""),
+                            "EndedOn": enroll.findtext("EndedOn", ""),
+                            "CoverageLevel": enroll.findtext("CoverageLevel", ""),
+                            "CarrierPlanCode": enroll.findtext("CarrierPlanCode", ""),
+                            "PriorCoverageStartDate": enroll.findtext("PriorCoverageStartDate", ""),
+                        }
 
-                for emp in employees:
-                    emp_data = {
-                        "FirstName": emp.findtext("FirstName", ""),
-                        "MiddleName": emp.findtext("MiddleName", ""),
-                        "LastName": emp.findtext("LastName", ""),
-                        "EmploymentStatus": emp.findtext("EmploymentStatus", ""),
-                        "HireDate": emp.findtext("HireDate", ""),
-                        "HiredOn": emp.findtext("HiredOn", ""),
-                        "TerminationDate": emp.findtext("TerminationDate", ""),
-                        "TerminatedOn": emp.findtext("TerminatedOn", ""),
-                    }
-
-                    enrollments = emp.findall("Enrollments/Enrollment")
-                    if enrollments:
-                        for enroll in enrollments:
-                            enroll_data = {
-                                "PlanCost": enroll.findtext("PlanCost", ""),
-                                "StartDate": enroll.findtext("StartDate", ""),
-                                "EnrolledOn": enroll.findtext("EnrolledOn", ""),
-                                "EndDate": enroll.findtext("EndDate", ""),
-                                "EndedOn": enroll.findtext("EndedOn", ""),
-                                "CoverageLevel": enroll.findtext("CoverageLevel", ""),
-                                "CarrierPlanCode": enroll.findtext("CarrierPlanCode", ""),
-                                "PriorCoverageStartDate": enroll.findtext("PriorCoverageStartDate", ""),
-                            }
-
-                            if first_employee:
-                                final_data = {**full_data, **emp_data, **enroll_data}
-                                first_employee = False
-                            else:
-                                final_data = {**{k: "" for k in full_data}, **emp_data, **enroll_data}
-
-                            cleaned_data = {col: final_data.get(col, "") for col in EXPECTED_COLUMNS}
-                            data_list.append(cleaned_data)
-                    else:
                         if first_employee:
-                            final_data = {**full_data, **emp_data}
+                            final_data = {**full_data, **emp_data, **enroll_data}
                             first_employee = False
                         else:
-                            final_data = {**{k: "" for k in full_data}, **emp_data}
+                            final_data = {**{k: "" for k in full_data}, **emp_data, **enroll_data}
 
-                        cleaned_data = {col: final_data.get(col, "") for col in EXPECTED_COLUMNS}
-                        data_list.append(cleaned_data)
-                elem.clear()
+                        data_list.append({c: final_data.get(c, "") for c in EXPECTED_COLUMNS})
+                else:
+                    if first_employee:
+                        final_data = {**full_data, **emp_data}
+                        first_employee = False
+                    else:
+                        final_data = {**{k: "" for k in full_data}, **emp_data}
 
-    df = pd.DataFrame(data_list, columns=EXPECTED_COLUMNS)
-    df.to_excel(output_excel_path, index=False)
-    print(f"✅ Excel file saved at: {output_excel_path}")
+                    data_list.append({c: final_data.get(c, "") for c in EXPECTED_COLUMNS})
 
-# === EXECUTE ===
-xml_to_exact_excel(xml_file, output_file)
+            elem.clear()
+
+    return pd.DataFrame(data_list, columns=EXPECTED_COLUMNS)
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # STEP 3 — Excel + CSV merger
 # ────────────────────────────────────────────────────────────────────────────
+def merge_excel_and_csv(master_bytes: bytes, csv_bytes: bytes) -> pd.DataFrame:
+    master_df = pd.read_excel(io.BytesIO(master_bytes))
+    cost_df = pd.read_csv(io.BytesIO(csv_bytes), encoding="latin1")
 
-import pandas as pd
+    cost_df.rename(columns={
+        "Member First Name": "FirstName",
+        "Member Last Name": "LastName",
+        "Group Number": "Identifier",
+    }, inplace=True)
 
-# === FILE PATHS ===
-master_file = r"C:\Users\LENOVO\OneDrive\Documents\REDH\Invoice QC\2026\11.Nov 2026\EN XML & XLS Data Nov-2026\Single Data file before merger.xlsx"
-cost_file = r"C:\Users\LENOVO\OneDrive\Documents\REDH\Invoice QC\2026\11.Nov 2026\EN XML & XLS Data Nov-2026\NetSuiteInvoiceReportMonthly_20261017.csv"
-output_file = r"C:\Users\LENOVO\OneDrive\Documents\REDH\Invoice QC\2026\11.Nov 2026\EN XML & XLS Data Nov-2026\Single Data after merger.xlsx"
-master_df = pd.read_excel(master_file)
-cost_df = pd.read_csv(cost_file, encoding='latin1')
+    missing = [c for c in COST_COLUMNS if c not in cost_df.columns]
+    if missing:
+        raise ValueError(f"CSV is missing expected column(s): {missing}")
 
-# === NORMALIZE FUNCTION ===
-def normalize(val):
-    return str(val).strip().lower()
+    for col in ["FirstName", "LastName", "Identifier"]:
+        if col in master_df.columns:
+            master_df[col] = master_df[col].apply(normalize)
+        if col in cost_df.columns:
+            cost_df[col] = cost_df[col].apply(normalize)
 
-# === RENAME COST FILE COLUMNS TO MATCH MASTER ===
-cost_df.rename(columns={
-    "Member First Name": "FirstName",
-    "Member Last Name": "LastName",
-    "Group Number": "Identifier"
-}, inplace=True)
+    merged_df = master_df.merge(
+        cost_df[["FirstName", "LastName", "Identifier"] + COST_COLUMNS],
+        on=["FirstName", "LastName", "Identifier"],
+        how="left",
+    )
 
-# === NORMALIZE COLUMNS FOR MATCHING ===
-for col in ['FirstName', 'LastName', 'Identifier']:
-    if col in master_df.columns:
-        master_df[col] = master_df[col].apply(normalize)
-    if col in cost_df.columns:
-        cost_df[col] = cost_df[col].apply(normalize)
+    merged_df["Charge"] = merged_df["Premium ($)"]
+    merged_df["CoverageCSV"] = merged_df["Coverage/Plan Type/Plan Tier"].fillna("0")
+    merged_df["PlanSKUCSV"] = merged_df["Plan SKU"].fillna("0")
+    merged_df["Identifier"] = merged_df["Identifier"].astype(str).str.upper()
 
-# === MERGE ON FIRSTNAME, LASTNAME, IDENTIFIER ===
+    merged_df.drop(columns=COST_COLUMNS, inplace=True)
 
-merged_df = master_df.merge(
-    cost_df[['FirstName', 'LastName', 'Identifier', 'Premium ($)', 'Coverage/Plan Type/Plan Tier', 'Plan SKU']],
-    on=['FirstName', 'LastName', 'Identifier'],
-    how='left'
-)
+    return merged_df
 
-# === ASSIGN FIELDS ===
-merged_df['Charge'] = merged_df['Premium ($)']
-merged_df['CoverageCSV'] = merged_df['Coverage/Plan Type/Plan Tier'].fillna('0')
-merged_df['PlanSKUCSV'] = merged_df['Plan SKU'].fillna ('0')
-
-merged_df['Identifier'] = merged_df['Identifier'].str.upper()
-
-# === DROP UNUSED COLUMNS ===
-merged_df.drop(columns=['Premium ($)', 'Coverage/Plan Type/Plan Tier', 'Plan SKU'], inplace=True)
-
-# === SAVE TO EXCEL ===
-merged_df.to_excel(output_file, index=False)
-print(f"✅ File saved: {output_file}")
 
 # ────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Excel split by company (with formulas + duplicates highlight)
+# STEP 4 — Excel split by company (formulas + duplicates highlight)
 # ────────────────────────────────────────────────────────────────────────────
+def split_excel_by_name(excel_bytes: bytes, month: str, year: str):
+    df = pd.read_excel(io.BytesIO(excel_bytes))
 
-import pandas as pd
-import os
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import PatternFill
-from openpyxl.formatting.rule import FormulaRule
-
-def split_excel_by_name(excel_file, month, year):
-    df = pd.read_excel(excel_file)
-
-    if 'Name' not in df.columns:
+    if "Name" not in df.columns:
         raise ValueError("Column 'Name' not found in the Excel file.")
 
-    output_folder = f"split_excel_{month}_{year}"
-    os.makedirs(output_folder, exist_ok=True)
+    zip_buffer = io.BytesIO()
+    files_created = []
+    skipped = int(df["Name"].isna().sum())
 
-    for name, group in df.groupby('Name'):
-        if pd.isna(name):
-            print("Name missing in some rows, skipping...")
-            continue
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, group in df.groupby("Name"):
+            if pd.isna(name) or str(name).strip() == "":
+                continue
 
-        safe_name = str(name).replace("/", "_").replace("\\", "_")
-        output_file = os.path.join(output_folder, f"{safe_name} ({month}-{year}).xlsx")
+            group = group.copy()
+            if "Diff" not in group.columns:
+                group["Diff"] = ""
 
-        # Ensure 'Diff' column exists
-        if 'Diff' not in group.columns:
-            group['Diff'] = ''  # Placeholder for formula
+            sheet_buf = io.BytesIO()
+            group.to_excel(sheet_buf, index=False)
+            sheet_buf.seek(0)
 
-        group.to_excel(output_file, index=False)
+            wb = load_workbook(sheet_buf)
+            ws = wb.active
 
-        wb = load_workbook(output_file)
-        ws = wb.active
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
 
-        # Freeze header row and apply autofilter
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
+            headers = {cell.value: cell.column for cell in ws[1]}
 
-        # Get column headers and their Excel column letters
-        headers = {cell.value: cell.column for cell in ws[1]}
+            if {"PlanCost", "Charge", "Diff"} <= set(headers):
+                plan_cost_col = get_column_letter(headers["PlanCost"])
+                charge_col = get_column_letter(headers["Charge"])
+                diff_col = get_column_letter(headers["Diff"])
 
-        # Add formula in 'Diff' column
-        if 'PlanCost' in headers and 'Charge' in headers and 'Diff' in headers:
-            plan_cost_col = get_column_letter(headers['PlanCost'])
-            charge_col = get_column_letter(headers['Charge'])
-            diff_col = get_column_letter(headers['Diff'])
+                for row in range(2, ws.max_row + 1):
+                    ws[f"{diff_col}{row}"] = f"={plan_cost_col}{row}-{charge_col}{row}"
 
-            for row in range(2, ws.max_row + 1):
-                formula = f"={plan_cost_col}{row}-{charge_col}{row}"
-                ws[f"{diff_col}{row}"] = formula
+            if "Lookup Criteria" in headers:
+                lookup_col_letter = get_column_letter(headers["Lookup Criteria"])
+                data_range = f"${lookup_col_letter}$2:${lookup_col_letter}${ws.max_row}"
+                rule = FormulaRule(
+                    formula=[f"=COUNTIF({data_range}, {lookup_col_letter}2)>1"],
+                    fill=PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+                )
+                ws.conditional_formatting.add(data_range, rule)
 
-        # Apply conditional formatting to highlight duplicates in 'Lookup Criteria'
-        if 'Lookup Criteria' in headers:
-            lookup_col_letter = get_column_letter(headers['Lookup Criteria'])
-            start_row = 2
-            end_row = ws.max_row
-            data_range = f"${lookup_col_letter}${start_row}:${lookup_col_letter}${end_row}"
+            out_buf = io.BytesIO()
+            wb.save(out_buf)
 
-            # COUNTIF formula to check for duplicates
-            formula = f'=COUNTIF({data_range}, {lookup_col_letter}{start_row})>1'
+            safe_name = str(name).replace("/", "_").replace("\\", "_")
+            filename = f"{safe_name} ({month}-{year}).xlsx"
+            zf.writestr(filename, out_buf.getvalue())
+            files_created.append(filename)
 
-            duplicate_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-            rule = FormulaRule(formula=[formula], fill=duplicate_fill)
-            ws.conditional_formatting.add(data_range, rule)
+    return zip_buffer.getvalue(), files_created, skipped
 
-        wb.save(output_file)
-        print(f"Created: {output_file}")
-
-if __name__ == "__main__":
-    excel_file = r"C:\Users\LENOVO\OneDrive\Documents\REDH\Invoice QC\2026\8. Aug 2026\EN XML & XLS Data Aug-2026\Single Data File After Merger.xlsx"
-    month = input("Enter the month (e.g., Jan, Feb, etc.): ").strip()
-    year = input("Enter the year (e.g., 2024): ").strip()
-
-    split_excel_by_name(excel_file, month, year)
 
 # ────────────────────────────────────────────────────────────────────────────
 # UI — TABS
@@ -359,7 +322,7 @@ with tab1:
         try:
             with st.spinner("Splitting XML by company…"):
                 zip_bytes, files, skipped = split_xml_by_company(
-                    xml_file_1.read(), month1, year1
+                    xml_file_1.getvalue(), month1, year1
                 )
 
             st.success(f"✅ Created {len(files)} XML file(s).")
@@ -395,7 +358,7 @@ with tab2:
     if xml_file_2:
         try:
             with st.spinner("Parsing XML and building Excel…"):
-                df = xml_to_single_excel(xml_file_2.read())
+                df = xml_to_single_excel(xml_file_2.getvalue())
 
             st.success(f"✅ Extracted {len(df):,} row(s).")
             st.write("Preview:")
@@ -405,7 +368,7 @@ with tab2:
                 label="⬇️ Download Excel (Single Data file before merger)",
                 data=df_to_excel_bytes(df),
                 file_name="Single Data file before merger.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime=XLSX_MIME,
             )
         except ET.ParseError as e:
             st.error(f"XML parse error: {e}")
@@ -438,7 +401,7 @@ with tab3:
     if master_xlsx and cost_csv:
         try:
             with st.spinner("Merging…"):
-                merged_df = merge_excel_and_csv(master_xlsx.read(), cost_csv.read())
+                merged_df = merge_excel_and_csv(master_xlsx.getvalue(), cost_csv.getvalue())
 
             matched = merged_df["Charge"].notna().sum()
             unmatched = merged_df["Charge"].isna().sum()
@@ -451,7 +414,7 @@ with tab3:
                 label="⬇️ Download merged Excel (XML.xlsx)",
                 data=df_to_excel_bytes(merged_df),
                 file_name="XML.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime=XLSX_MIME,
             )
         except ValueError as e:
             st.error(str(e))
@@ -474,7 +437,7 @@ with tab4:
         try:
             with st.spinner("Splitting by company and applying formatting…"):
                 zip_bytes, files, skipped = split_excel_by_name(
-                    merged_xlsx.read(), month4, year4
+                    merged_xlsx.getvalue(), month4, year4
                 )
 
             st.success(f"✅ Created {len(files)} Excel file(s).")
